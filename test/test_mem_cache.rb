@@ -5,7 +5,7 @@ require 'test/zentest_assertions'
 
 $TESTING = true
 
-require 'memcache'
+require 'lib/memcache'
 
 class MemCache
 
@@ -183,6 +183,7 @@ class TestMemCache < Test::Unit::TestCase
     assert_equal 'my_namespace', cache.namespace
     assert_equal true, cache.readonly?
     assert_equal false, cache.servers.empty?
+    assert_equal true, cache.servers.first.tcp_nodelay
   end
 
   def test_initialize_compatible_no_hash
@@ -217,6 +218,19 @@ class TestMemCache < Test::Unit::TestCase
     assert_equal true, cache.readonly?
     assert_equal false, cache.servers.empty?
     deny_empty cache.instance_variable_get(:@buckets)
+  end
+
+  def test_initialize_with_server_options
+    cache = MemCache.new %w[localhost:11211 localhost:11212],
+                         :namespace => 'my_namespace', :retry_delay => 15.0, 
+                         :connect_timeout => 5.0
+
+    assert_equal 'my_namespace', cache.namespace
+    assert_equal false, cache.servers.empty?
+    cache.servers.each do |s|
+      assert_equal 5.0, s.connect_timeout
+      assert_equal 15.0, s.retry_delay
+    end
   end
 
   def test_initialize_too_many_args

@@ -56,9 +56,9 @@ class MemCache
   # Default options for the cache object.
 
   DEFAULT_OPTIONS = {
-    :namespace   => nil,
-    :readonly    => false,
-    :multithread => false,
+    :namespace        => nil,
+    :readonly         => false,
+    :multithread      => false
   }
 
   ##
@@ -99,9 +99,12 @@ class MemCache
   #
   # Valid options for +opts+ are:
   #
-  #   [:namespace]   Prepends this value to all keys added or retrieved.
-  #   [:readonly]    Raises an exeception on cache writes when true.
-  #   [:multithread] Wraps cache access in a Mutex for thread safety.
+  #   [:namespace]        Prepends this value to all keys added or retrieved.
+  #   [:readonly]         Raises an exeception on cache writes when true.
+  #   [:multithread]      Wraps cache access in a Mutex for thread safety.
+  #   [:tcp_nodelay]      Boolean for turning on the TCP_NODELAY option if supported (default = true)
+  #   [:retry_delay]      Amount of itme to wait before re-establishing a dead conneciton.
+  #   [:connect_timeout]  Amount of itme to wait to establish a connection to a memcache server. 
   #
   # Other options are ignored.
 
@@ -126,12 +129,13 @@ class MemCache
     end
 
     opts = DEFAULT_OPTIONS.merge opts
-    @namespace   = opts[:namespace]
-    @readonly    = opts[:readonly]
-    @multithread = opts[:multithread]
-    @mutex       = Mutex.new if @multithread
-    @buckets     = []
-    self.servers = servers
+    @namespace        = opts.delete(:namespace)
+    @readonly         = opts.delete(:readonly)
+    @multithread      = opts.delete(:multithread)
+    @mutex            = Mutex.new if @multithread
+    @buckets          = []
+    @server_opts      = opts
+    self.servers      = servers
   end
 
   ##
@@ -169,7 +173,7 @@ class MemCache
         host, port, weight = server.split ':', 3
         port ||= DEFAULT_PORT
         weight ||= DEFAULT_WEIGHT
-        Server.new self, host, port, weight
+        Server.new self, host, port, weight, @server_opts
       when Server
         if server.memcache.multithread != @multithread then
           raise ArgumentError, "can't mix threaded and non-threaded servers"
@@ -645,18 +649,17 @@ class MemCache
 
   class Server
 
-    ##
-    # The amount of time to wait to establish a connection with a memcached
-    # server.  If a connection cannot be established within this time limit,
-    # the server will be marked as down.
-
-    CONNECT_TIMEOUT = 0.25
+    DEFAULT_CONNECTION_OPTIONS = {
+      :connect_timeout => 0.25,
+      :tcp_nodelay => true,
+      :retry_delay => 30.0
+    }
 
     ##
     # The amount of time to wait before attempting to re-establish a
     # connection with a server that is marked dead.
 
-    RETRY_DELAY = 30.0
+    attr_reader :retry_delay
 
     ##
     # The host the memcached server is running on.
@@ -683,11 +686,23 @@ class MemCache
 
     attr_reader :status
 
+    ## 
+    # Whether or not the TCP_NODELAY option is set on the socket.
+
+    attr_reader :tcp_nodelay
+
+    ##
+    # The amount of time to wait to establish a connection with a memcached
+    # server.  If a connection cannot be established within this time limit,
+    # the server will be marked as down.
+
+    attr_reader :connect_timeout
+
     ##
     # Create a new MemCache::Server object for the memcached instance
     # listening on the given host and port, weighted by the given weight.
 
-    def initialize(memcache, host, port = DEFAULT_PORT, weight = DEFAULT_WEIGHT)
+    def initialize(memcache, host, port = DEFAULT_PORT, weight = DEFAULT_WEIGHT, options = {})
       raise ArgumentError, "No host specified" if host.nil? or host.empty?
       raise ArgumentError, "No port specified" if port.nil? or port.to_i.zero?
 
@@ -699,6 +714,12 @@ class MemCache
       @multithread = @memcache.multithread
       @mutex = Mutex.new
 
+      opts = DEFAULT_CONNECTION_OPTIONS.merge(options)
+
+      @retry_delay = opts[:retry_delay].to_f
+      @tcp_nodelay = opts[:tcp_nodelay]
+      @connect_timeout = opts[:connect_timeout].to_f
+
       @sock   = nil
       @retry  = nil
       @status = 'NOT CONNECTED'
@@ -708,7 +729,7 @@ class MemCache
     # Return a string representation of the server object.
 
     def inspect
-      "<MemCache::Server: %s:%d [%d] (%s)>" % [@host, @port, @weight, @status]
+      "<MemCache::Server: %s:%d [%d] [%p] [%d] [%d] (%s)>" % [@host, @port, @weight, @tcp_nodelay, @connect_timeout, @retry_delay, @status]
     end
 
     ##
@@ -736,10 +757,10 @@ class MemCache
 
       # Attempt to connect if not already connected.
       begin
-        @sock = timeout CONNECT_TIMEOUT do
+        @sock = timeout @connect_timeout do
           TCPSocket.new @host, @port
         end
-        if Socket.constants.include? 'TCP_NODELAY' then
+        if Socket.constants.include? 'TCP_NODELAY' && @tcp_nodelay
           @sock.setsockopt Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1
         end
         @retry  = nil
@@ -775,7 +796,7 @@ class MemCache
     def mark_dead(reason = "Unknown error")
       @sock.close if @sock && !@sock.closed?
       @sock   = nil
-      @retry  = Time.now + RETRY_DELAY
+      @retry  = Time.now + @retry_delay
 
       @status = sprintf "DEAD: %s, will retry at %s", reason, @retry
     end
